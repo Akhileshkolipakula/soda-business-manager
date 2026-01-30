@@ -288,7 +288,7 @@ if st.session_state.user is None:
                     "username": username,
                     "role": user[1]
                 }
-
+                save_session(st.session_state.user, "Dashboard")
                 st.success("Login successful")
                 st.rerun()
             else:
@@ -317,10 +317,12 @@ if st.session_state.user is None:
 
 # ---------- LOGOUT ----------
 st.sidebar.write(f"👤 {st.session_state.user['username']}")
-st.session_state.user = None
-st.session_state.page = "Dashboard"
-st.rerun()
 
+if st.sidebar.button("Logout"):
+
+    clear_session()
+    st.session_state.user = None
+    st.rerun()
 
 # -------------------- SIDEBAR --------------------
 st.sidebar.title("🥤 Soda Manager")
