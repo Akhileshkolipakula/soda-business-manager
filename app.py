@@ -7,14 +7,6 @@ import plotly.express as px
 import os
 import hashlib
 
-# ---------------- CLOUD SAFE SESSION ----------------
-
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-if "page" not in st.session_state:
-    st.session_state.page = "Dashboard"
-
 # -------------------- DATABASE --------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "soda_business.db")
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -196,6 +188,20 @@ def load_session():
     except:
         return None
 
+
+def clear_session():
+    """Remove persisted session file and reset Streamlit session state."""
+    try:
+        if os.path.exists(SESSION_FILE):
+            os.remove(SESSION_FILE)
+    except Exception:
+        pass
+
+    # reset session-related state
+    st.session_state.user = None
+    st.session_state.authenticated = False
+    st.session_state.page = "Dashboard"
+
 # -------------------- AUTH HELPERS -----------------
 
 def hash_password(password):
@@ -327,7 +333,19 @@ if st.sidebar.button("Logout"):
 # -------------------- SIDEBAR --------------------
 st.sidebar.title("🥤 Soda Manager")
 # bind radio to session_state so we can change it programmatically
-pages = [
+# -------------------- ROLE BASED PAGES --------------------
+
+role = st.session_state.user["role"]
+
+# Pages for staff users
+user_pages = [
+    "Dashboard",
+    "Record Sale",
+    "Customers"
+]
+
+# Pages for admin
+admin_pages = [
     "Dashboard",
     "Flavors",
     "Products",
@@ -340,6 +358,12 @@ pages = [
     "Admin Activity"
 ]
 
+# Select pages based on role
+if role == "admin":
+    pages = admin_pages
+else:
+    pages = user_pages
+
 default_page = st.session_state.get("page", "Dashboard")
 
 if default_page not in pages:
@@ -351,6 +375,13 @@ page = st.sidebar.radio(
     index=pages.index(default_page),
     key="page"
 )
+
+# ---------------- SECURITY CHECK ----------------
+
+if role != "admin" and page not in user_pages:
+    st.error("Access Denied 🚫")
+    st.stop()
+
 
 # Save current page
 save_session(st.session_state.user, page)
@@ -376,12 +407,22 @@ if page == "Dashboard":
     remaining_investment = total_investment - cost_used
     profit = total_revenue - cost_used
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Stock", total_stock)
-    c2.metric("Revenue", f"₹{total_revenue:,.2f}")
-    c3.metric("Cost Used (Production)", f"₹{cost_used:,.2f}")
-    c4.metric("Remaining Investment", f"₹{remaining_investment:,.2f}")
-    c5.metric("Profit / Loss", f"₹{profit:,.2f}")
+    # ---------------- USER DASHBOARD VIEW ----------------
+
+    if st.session_state.user["role"] != "admin":
+
+        c1 = st.columns(1)[0]
+        c1.metric("Total Stock", total_stock)
+
+    else:
+    # ---------------- ADMIN DASHBOARD VIEW ----------------
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Stock", total_stock)
+        c2.metric("Revenue", f"₹{total_revenue:,.2f}")
+        c3.metric("Cost Used (Production)", f"₹{cost_used:,.2f}")
+        c4.metric("Remaining Investment", f"₹{remaining_investment:,.2f}")
+        c5.metric("Profit / Loss", f"₹{profit:,.2f}")
 
     st.subheader("📦 Stock Table")
     if not products.empty:
@@ -964,11 +1005,15 @@ elif page == "Customers":
             col7.write(row['updated_at'])
             if col8.button("✏️ Edit", key=f"cust_edit_{row['id']}"):
                 st.session_state.edit_customer_id = int(row["id"])
-            if col6.button("🗑", key=f"cust_del_{row['id']}"):
-                c.execute("DELETE FROM customers WHERE id=?", (int(row["id"]),))
-                conn.commit()
-                st.success("Customer deleted")
-                run_rerun()
+            # Delete only for admin
+            if st.session_state.user["role"] == "admin":
+
+                if col6.button("🗑", key=f"cust_del_{row['id']}"):
+                    c.execute("DELETE FROM customers WHERE id=?", (int(row["id"]),))
+                    conn.commit()
+                    st.success("Customer deleted")
+                    run_rerun()
+
         if "edit_customer_id" in st.session_state:
             cid = st.session_state.edit_customer_id
             cust = customers[customers["id"]==cid].iloc[0]
