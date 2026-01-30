@@ -5,75 +5,7 @@ import sqlite3
 from datetime import date
 import plotly.express as px
 import os
-
-# -------------------- CONFIG --------------------
-st.set_page_config(page_title="Soda Business Manager", layout="wide")
-APP_PASSWORD = "soda123"
-
-# -------------------- RERUN / REFRESH HELPERS --------------------
-def run_rerun():
-    """
-    Trigger a full page rerun to refresh data immediately.
-    """
-    st.rerun()
-
-# -------------------- AUTH (PERSISTENT) --------------------
-AUTH_FILE = "auth_session.txt"
-
-
-def is_logged_in():
-    if os.path.exists(AUTH_FILE):
-        with open(AUTH_FILE, "r") as f:
-            return f.read().strip() == "1"
-    return False
-
-
-def set_login(state: bool):
-    with open(AUTH_FILE, "w") as f:
-        f.write("1" if state else "0")
-
-
-# Load login state on refresh
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = is_logged_in()
-
-
-if not st.session_state.authenticated:
-    st.title("🔐 Soda Business Manager Login")
-
-    with st.form("login_form"):
-        pwd = st.text_input("Enter password", type="password")
-        submitted = st.form_submit_button("Login")
-
-        if submitted:
-            if pwd == APP_PASSWORD:
-                st.session_state.authenticated = True
-                set_login(True)   # ✅ Save login
-                st.success("Login successful")
-                st.rerun()
-            else:
-                st.error("Wrong password")
-
-    st.stop()
-
-# Keep page in session state so we can programmatically change it
-if "page" not in st.session_state:
-    st.session_state.page = "Dashboard"
-
-if not st.session_state.authenticated:
-    st.title("🔐 Soda Business Manager Login")
-    with st.form("login_form"):
-        pwd = st.text_input("Enter password", type="password")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            if pwd == APP_PASSWORD:
-                st.session_state.authenticated = True
-                # set page to Dashboard and rerun so sidebar reflects it immediately
-                st.session_state.page = "Dashboard"
-                run_rerun()
-            else:
-                st.error("Wrong password")
-    st.stop()
+import hashlib
 
 # -------------------- DATABASE --------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "soda_business.db")
@@ -130,8 +62,66 @@ CREATE TABLE IF NOT EXISTS investments (
     amount REAL,
     note TEXT
 );
+                
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password_hash TEXT,
+    role TEXT DEFAULT 'staff'
+);
+
+-- Activity Log
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    action TEXT,
+    date TEXT
+);
 """)
 conn.commit()
+
+# -------------------- AUTO MIGRATION (SAFE) --------------------
+
+def add_column_if_not_exists(table, column, col_type):
+
+    cols = c.execute(f"PRAGMA table_info({table})").fetchall()
+    col_names = [col[1] for col in cols]
+
+    if column not in col_names:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.commit()
+
+
+# Products
+add_column_if_not_exists("products", "created_by", "TEXT")
+add_column_if_not_exists("products", "updated_by", "TEXT")
+add_column_if_not_exists("products", "created_at", "TEXT")
+add_column_if_not_exists("products", "updated_at", "TEXT")
+
+# Customers
+add_column_if_not_exists("customers", "created_by", "TEXT")
+add_column_if_not_exists("customers", "updated_by", "TEXT")
+add_column_if_not_exists("customers", "created_at", "TEXT")
+add_column_if_not_exists("customers", "updated_at", "TEXT")
+
+# Stock
+add_column_if_not_exists("stock_additions", "created_by", "TEXT")
+add_column_if_not_exists("stock_additions", "created_at", "TEXT")
+
+# Sales
+add_column_if_not_exists("sales", "created_by", "TEXT")
+add_column_if_not_exists("sales", "created_at", "TEXT")
+
+# -------------------- CONFIG --------------------
+st.set_page_config(page_title="Soda Business Manager", layout="wide")
+# APP_PASSWORD = "soda123"
+
+# -------------------- RERUN / REFRESH HELPERS --------------------
+def run_rerun():
+    """
+    Trigger a full page rerun to refresh data immediately.
+    """
+    st.rerun()
 
 # -------------------- HELPERS --------------------
 def get_flavors():
@@ -142,7 +132,7 @@ def get_flavors():
 
 def get_products():
     df = pd.read_sql("""
-        SELECT p.id, p.flavor_id, p.cost_price, p.selling_price, p.stock, f.flavor_name
+        SELECT p.id, p.flavor_id, p.cost_price, p.selling_price, p.stock, f.flavor_name, p.created_by, p.created_at, p.updated_by, p.updated_at
         FROM products p
         LEFT JOIN flavors f ON p.flavor_id = f.id
         ORDER BY f.flavor_name, p.id
@@ -164,25 +154,198 @@ def get_customers():
 # ensure helpers re-evaluate when refresh flag toggles
 _ = st.session_state.get("_refresh_flag", False)
 
+# -------------------- SESSION PERSISTENCE --------------------
+
+SESSION_FILE = "auth_session.txt"
+
+
+def save_session(user, page="Dashboard"):
+    with open(SESSION_FILE, "w") as f:
+        f.write(f"{user['id']}|{user['username']}|{user['role']}|{page}")
+
+
+def load_session():
+
+    if not os.path.exists(SESSION_FILE):
+        return None
+
+    try:
+        with open(SESSION_FILE) as f:
+            data = f.read().strip()
+
+        if not data:
+            return None
+
+        uid, uname, role, page = data.split("|")
+
+        return {
+            "id": int(uid),
+            "username": uname,
+            "role": role,
+            "page": page
+        }
+
+    except:
+        return None
+
+# -------------------- AUTH HELPERS -----------------
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def create_user(username, password, role="staff"):
+    try:
+        c.execute("""
+        INSERT INTO users(username,password_hash,role)
+        VALUES(?,?,?)
+        """, (username, hash_password(password), role))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def verify_user(username, password):
+    hashed = hash_password(password)
+
+    user = c.execute("""
+        SELECT id, role FROM users
+        WHERE username=? AND password_hash=?
+    """, (username, hashed)).fetchone()
+
+    return user
+
+# -------------------- AUDIT HELPERS --------------------
+
+def current_user():
+    return st.session_state.user["username"]
+
+
+def log_activity(action):
+
+    user = st.session_state.get("user")
+
+    if not user:
+        return
+
+    c.execute("""
+        INSERT INTO activity_logs(username,action,date)
+        VALUES (?,?,?)
+    """, (
+        user["username"],
+        action,
+        date.today().isoformat()
+    ))
+
+    conn.commit()
+
+# -------------------- AUTH (MULTI USER) --------------------
+
+if "user" not in st.session_state:
+
+    saved = load_session()
+
+    if saved:
+        st.session_state.user = saved
+    else:
+        st.session_state.user = None
+
+# Create first admin (only if no users exist)
+user_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+if user_count == 0:
+    create_user("admin", "admin123", "admin")
+
+
+if st.session_state.user is None:
+
+    st.title("🔐 Login")
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
+
+    # ---------- LOGIN ----------
+    with tab1:
+
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
+
+        if st.button("Login"):
+
+            user = verify_user(username, password)
+
+            if user:
+                st.session_state.user = {
+                    "id": user[0],
+                    "username": username,
+                    "role": user[1]
+                }
+                save_session(st.session_state.user, "Dashboard")
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    # ---------- REGISTER ----------
+    with tab2:
+
+        new_user = st.text_input("New Username")
+        new_pass = st.text_input("New Password", type="password")
+
+        if st.button("Register"):
+
+            if len(new_pass) < 4:
+                st.error("Password too short")
+            else:
+                ok = create_user(new_user, new_pass)
+
+                if ok:
+                    st.success("Account created. Login now.")
+                else:
+                    st.error("Username already exists")
+
+    st.stop()
+
+
+# ---------- LOGOUT ----------
+st.sidebar.write(f"👤 {st.session_state.user['username']}")
+
+if st.sidebar.button("Logout"):
+
+    clear_session()
+    st.session_state.user = None
+    st.rerun()
+
 # -------------------- SIDEBAR --------------------
 st.sidebar.title("🥤 Soda Manager")
 # bind radio to session_state so we can change it programmatically
+pages = [
+    "Dashboard",
+    "Flavors",
+    "Products",
+    "Add Stock",
+    "Record Sale",
+    "Company Investment",
+    "Reports & Graphs",
+    "Financial Summary",
+    "Customers",
+    "Admin Activity"
+]
+
+default_page = st.session_state.get("page", "Dashboard")
+
+if default_page not in pages:
+    default_page = "Dashboard"
+
 page = st.sidebar.radio(
     "Navigation",
-    [
-        "Dashboard",
-        "Flavors",
-        "Products",
-        "Add Stock",
-        "Record Sale",
-        "Company Investment",
-        "Reports & Graphs",
-        "Financial Summary",
-        "Customers"
-    ],
-    index=["Dashboard","Flavors","Products","Add Stock","Record Sale","Company Investment","Reports & Graphs","Financial Summary","Customers"].index(st.session_state.get("page","Dashboard")),
+    pages,
+    index=pages.index(default_page),
     key="page"
 )
+
+# Save current page
+save_session(st.session_state.user, page)
 
 # -------------------- DASHBOARD --------------------
 if page == "Dashboard":
@@ -214,7 +377,19 @@ if page == "Dashboard":
 
     st.subheader("📦 Stock Table")
     if not products.empty:
-        st.dataframe(products[["flavor_name", "cost_price", "selling_price", "stock"]], use_container_width=True)
+        st.dataframe(
+    products[[
+        "flavor_name",
+        "cost_price",
+        "selling_price",
+        "stock",
+        "created_by",
+        "created_at",
+        "updated_by",
+        "updated_at"
+    ]],
+    use_container_width=True
+)
         
         low = products[products["stock"] < 10]
         if not low.empty:
@@ -283,19 +458,23 @@ elif page == "Products":
         stock = st.number_input("Initial Stock", min_value=0, step=1, value=0)
         if st.form_submit_button("Add Product"):
             flavor_id = int(flavor_choice["id"])
-            c.execute("INSERT INTO products(flavor_id, cost_price, selling_price, stock) VALUES (?,?,?,?)",
-                      (flavor_id, float(cost), float(price), int(stock)))
+            c.execute("INSERT INTO products(flavor_id, cost_price, selling_price, stock, created_by, created_at) values (?,?,?,?,?,?)",
+                      (flavor_id, float(cost), float(price), int(stock), current_user(), date.today().isoformat()))
             conn.commit()
+            log_activity(f"Added product for flavor {flavor_choice['flavor_name']}")
             st.success("Product added")
             run_rerun()
 
     if not products.empty:
         for _, row in products.iterrows():
-            col1,col2,col3,col4,col5,col6 = st.columns([3,2,2,2,2,1])
+            col1,col2,col3,col4,col5,col6,col7 = st.columns([3,2,2,2,2,2,1])
             col1.write(row["flavor_name"])
             col2.write(f"₹{row['cost_price']:.2f}")
             col3.write(f"₹{row['selling_price']:.2f}")
             col4.write(f"Stock: {int(row['stock'])}")
+            col5.write(f"By: {row['created_by']}")
+            col6.write(f"Upd: {row['updated_by']}")
+            col7.write(row['updated_at'])
             if col5.button("✏️ Edit", key=f"edit_prod_{row['id']}"):
                 st.session_state.edit_product_id = int(row["id"])
             if col6.button("🗑", key=f"del_prod_{row['id']}"):
@@ -319,9 +498,10 @@ elif page == "Products":
                 stock = st.number_input("Stock", value=int(prod["stock"]), step=1)
                 if st.form_submit_button("Update Product"):
                     flavor_id = int(flavor_choice["id"])
-                    c.execute("UPDATE products SET flavor_id=?, cost_price=?, selling_price=?, stock=? WHERE id=?",
-                              (flavor_id, float(cost), float(price), int(stock), pid))
+                    c.execute("UPDATE products SET flavor_id=?, cost_price=?, selling_price=?, stock=?, updated_by=?, updated_at=? WHERE id=?",
+                              (flavor_id, float(cost), float(price), int(stock), current_user(), date.today().isoformat(), pid))
                     conn.commit()
+                    log_activity(f"Updated product {flavor_choice['flavor_name']}")
                     st.success("Product updated")
                     del st.session_state.edit_product_id
                     run_rerun()
@@ -367,109 +547,271 @@ elif page == "Add Stock":
         if st.form_submit_button("Add Stock"):
             pid = int(sel["id"])
             # Insert computed batch_cost into stock_additions and update product stock
-            c.execute("INSERT INTO stock_additions(product_id,date,quantity,batch_cost) VALUES (?,?,?,?)",
-                      (pid, d.isoformat(), int(qty), float(batch_cost)))
+            c.execute("INSERT INTO stock_additions(product_id,date,quantity,batch_cost, created_by,created_at) VALUES (?,?,?,?,?,?)",
+                      (pid, d.isoformat(), int(qty), float(batch_cost), current_user(), date.today().isoformat()))
             c.execute("UPDATE products SET stock = stock + ? WHERE id=?", (int(qty), pid))
             conn.commit()
+            log_activity(f"Added {qty} stock to {sel['flavor_name']}")
             # Show a simple confirmation; batch cost is already visible in the input above
             st.success("Stock added")
             run_rerun()
+            st.markdown("## 📦 Stock Addition History")
+
+        stock_df = pd.read_sql("""
+            SELECT
+                s.id,
+                f.flavor_name,
+                s.date,
+                s.quantity,
+                s.batch_cost,
+                s.created_by,
+                s.created_at
+            FROM stock_additions s
+            LEFT JOIN products p ON s.product_id = p.id
+            LEFT JOIN flavors f ON p.flavor_id = f.id
+            ORDER BY s.id DESC
+        """, conn)
+
+        if stock_df.empty:
+            st.info("No stock added yet.")
+        else:
+            st.dataframe(stock_df, use_container_width=True)
 
 # -------------------- RECORD SALE --------------------
 elif page == "Record Sale":
-    st.title("💰 Record Sale")
+
+    st.title("🧾 Record Sale")
+
     products = get_products()
     customers = get_customers()
 
     if products.empty:
-        st.warning("Add products first")
+        st.warning("No products available.")
         st.stop()
 
-    # Product selection (outside form so details update immediately)
-    product_records = products.to_dict(orient="records")
-    product_options = [{"id": int(r["id"]), "label": r["flavor_name"], "data": r} for r in product_records]
-    selected_product = st.selectbox(
+    # ------------------ Product Selection ------------------
+
+    prod_options = products.to_dict("records")
+
+    sel = st.selectbox(
         "Select Product",
-        options=product_options,
-        format_func=lambda x: x["label"],
-        key="product_select"
+        prod_options,
+        format_func=lambda x: f"{x['flavor_name']} (Stock: {x['stock']})"
     )
-    sel = selected_product["data"]
 
-    # Show product details immediately
-    st.markdown("**Product Details**")
-    pcol1, pcol2, pcol3 = st.columns(3)
-    pcol1.text_input("Cost Price", value=f"₹{sel['cost_price']:.2f}", disabled=True)
-    pcol2.text_input("Selling Price", value=f"₹{sel['selling_price']:.2f}", disabled=True)
-    pcol3.text_input("Available Stock", value=str(int(sel["stock"])), disabled=True)
+    if sel["stock"] <= 0:
+        st.error("Selected product is out of stock.")
+        st.stop()
 
-    # Customer selection (outside form so details update immediately)
-    cust_options = [{"id": "add_new", "name": "Add new customer"}]
-    cust_options += [{"id": int(r["id"]), "name": r["name"]} for _, r in customers.iterrows()]
-    cust_sel = st.selectbox("Choose customer", options=cust_options, format_func=lambda x: x["name"], key="cust_select")
+
+    # ------------------ Customer Selection ------------------
+
+    cust_options = [{"id": "add_new", "name": "➕ Add New Customer"}]
+
+    for _, r in customers.iterrows():
+        cust_options.append({
+            "id": r["id"],
+            "name": r["name"]
+        })
+
+
+    cust_sel = st.selectbox(
+        "Select Customer",
+        cust_options,
+        format_func=lambda x: x["name"]
+    )
+
+
+    # ------------------ Customer Form ------------------
+
+    # Initialize variables
+    new_cust_name = ""
+    new_cust_phone = ""
+    new_cust_shop = ""
+    new_cust_area = ""
+
+    name_val = ""
+    phone_val = ""
+    shop_val = ""
+    area_val = ""
+    selected_customer_id = None
+
 
     if cust_sel["id"] == "add_new":
+
+        st.subheader("➕ New Customer")
+
         new_cust_name = st.text_input("Customer Name")
-        new_cust_phone = st.text_input("Phone Number")
+        new_cust_phone = st.text_input("Phone")
         new_cust_shop = st.text_input("Shop Name")
         new_cust_area = st.text_input("Area")
-        selected_customer_id = None
+
     else:
+
         selected_customer_id = int(cust_sel["id"])
-        cust_row = customers[customers["id"] == selected_customer_id]
-        if not cust_row.empty:
-            cust_row = cust_row.iloc[0]
-            c1, c2 = st.columns(2)
-            name_val = c1.text_input("Customer Name", value=cust_row["name"])
-            phone_val = c2.text_input("Phone Number", value=cust_row["phone"] if cust_row["phone"] else "")
-            c3, c4 = st.columns(2)
-            shop_val = c3.text_input("Shop Name", value=cust_row["shop_name"] if cust_row["shop_name"] else "")
-            area_val = c4.text_input("Area", value=cust_row["area"] if cust_row["area"] else "")
-        else:
-            name_val = st.text_input("Customer Name", value="", disabled=True)
-            phone_val = st.text_input("Phone Number", value="", disabled=True)
-            shop_val = st.text_input("Shop Name", value="", disabled=True)
-            area_val = st.text_input("Area", value="", disabled=True)
 
-    # Sale form (only quantity/date/submit)
+        row = customers[customers["id"] == selected_customer_id].iloc[0]
+
+        name_val = st.text_input("Customer Name", row["name"])
+        phone_val = st.text_input("Phone", row["phone"])
+        shop_val = st.text_input("Shop Name", row["shop_name"])
+        area_val = st.text_input("Area", row["area"])
+
+
+    # ------------------ Sale Form ------------------
+
     with st.form("sale_form"):
-        qty = st.number_input("Quantity Sold", min_value=1, step=1, value=1)
-        d = st.date_input("Date", value=date.today())
-        if st.form_submit_button("Record Sale"):
-            if int(qty) > int(sel["stock"]):
-                st.error("Not enough stock")
-            else:
-                # Handle customer
-                if cust_sel["id"] == "add_new":
-                    if not new_cust_name or not new_cust_name.strip():
-                        st.error("Enter customer name")
-                        st.stop()
-                    c.execute("INSERT INTO customers(name, phone, shop_name, area) VALUES (?,?,?,?)",
-                              (new_cust_name.strip(),
-                               new_cust_phone.strip() if new_cust_phone else None,
-                               new_cust_shop.strip() if new_cust_shop else None,
-                               new_cust_area.strip() if new_cust_area else None))
-                    conn.commit()
-                    customer_id = c.lastrowid
-                else:
-                    if not name_val or not name_val.strip():
-                        st.error("Customer name cannot be empty")
-                        st.stop()
-                    c.execute("UPDATE customers SET name=?, phone=?, shop_name=?, area=? WHERE id=?",
-                              (name_val.strip(), phone_val.strip() if phone_val else None,
-                               shop_val.strip() if shop_val else None, area_val.strip() if area_val else None,
-                               selected_customer_id))
-                    conn.commit()
-                    customer_id = selected_customer_id
 
-                # Record sale and update stock
-                revenue = int(qty) * float(sel["selling_price"])
-                c.execute("INSERT INTO sales(product_id,date,quantity,revenue,customer_id) VALUES (?,?,?,?,?)",
-                          (int(sel["id"]), d.isoformat(), int(qty), float(revenue), int(customer_id)))
-                c.execute("UPDATE products SET stock = stock - ? WHERE id=?", (int(qty), int(sel["id"])))
-                conn.commit()
-                st.success(f"Sale recorded ₹{revenue:.2f}")
-                run_rerun()
+        qty = st.number_input(
+            "Quantity Sold",
+            min_value=1,
+            max_value=int(sel["stock"]),
+            step=1,
+            value=1
+        )
+
+        d = st.date_input("Sale Date", value=date.today())
+
+        submit_sale = st.form_submit_button("Record Sale")
+
+
+    # ------------------ Process Sale ------------------
+
+    if submit_sale:
+
+        # Validate stock
+        if int(qty) > int(sel["stock"]):
+            st.error("Not enough stock.")
+            st.stop()
+
+
+        # Handle customer
+        if cust_sel["id"] == "add_new":
+
+            if not new_cust_name.strip():
+                st.error("Customer name is required.")
+                st.stop()
+
+            # Insert new customer
+            c.execute("""
+                INSERT INTO customers(
+                    name, phone, shop_name, area,
+                    created_by, created_at
+                )
+                VALUES (?,?,?,?,?,?)
+            """, (
+                new_cust_name.strip(),
+                new_cust_phone.strip() if new_cust_phone else None,
+                new_cust_shop.strip() if new_cust_shop else None,
+                new_cust_area.strip() if new_cust_area else None,
+                current_user(),
+                date.today().isoformat()
+            ))
+
+            conn.commit()
+
+            customer_id = c.lastrowid
+
+
+        else:
+
+            # Update existing customer
+            c.execute("""
+                UPDATE customers
+                SET name=?, phone=?, shop_name=?, area=?,
+                    updated_by=?, updated_at=?
+                WHERE id=?
+            """, (
+                name_val.strip(),
+                phone_val.strip() if phone_val else None,
+                shop_val.strip() if shop_val else None,
+                area_val.strip() if area_val else None,
+                current_user(),
+                date.today().isoformat(),
+                selected_customer_id
+            ))
+
+            conn.commit()
+
+            customer_id = selected_customer_id
+
+
+        # Calculate revenue
+        revenue = int(qty) * float(sel["selling_price"])
+
+
+        # Insert sale
+        c.execute("""
+            INSERT INTO sales(
+                product_id,
+                date,
+                quantity,
+                revenue,
+                customer_id,
+                created_by,
+                created_at
+            )
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            int(sel["id"]),
+            d.isoformat(),
+            int(qty),
+            float(revenue),
+            int(customer_id),
+            current_user(),
+            date.today().isoformat()
+        ))
+
+
+        # Update stock
+        c.execute("""
+            UPDATE products
+            SET stock = stock - ?
+            WHERE id=?
+        """, (
+            int(qty),
+            int(sel["id"])
+        ))
+
+
+        conn.commit()
+
+
+        # Log activity
+        log_activity(f"Sold {qty} of {sel['flavor_name']}")
+
+
+        st.success("✅ Sale recorded successfully.")
+
+        st.rerun()
+
+
+    # ------------------ Sales History ------------------
+
+    st.markdown("## 📋 Sales History")
+
+    sales_df = pd.read_sql("""
+        SELECT 
+            s.id,
+            f.flavor_name,
+            s.date,
+            s.quantity,
+            s.revenue,
+            c.name AS customer,
+            s.created_by,
+            s.created_at
+        FROM sales s
+        LEFT JOIN products p ON s.product_id = p.id
+        LEFT JOIN flavors f ON p.flavor_id = f.id
+        LEFT JOIN customers c ON s.customer_id = c.id
+        ORDER BY s.id DESC
+    """, conn)
+
+
+    if sales_df.empty:
+        st.info("No sales recorded yet.")
+    else:
+        st.dataframe(sales_df, use_container_width=True)
 
 # -------------------- COMPANY INVESTMENT --------------------
 elif page == "Company Investment":
@@ -593,9 +935,10 @@ elif page == "Customers":
         area = st.text_input("Area")
         if st.form_submit_button("Add Customer"):
             if name and name.strip():
-                c.execute("INSERT INTO customers(name, phone, shop_name, area) VALUES (?,?,?,?)",
-                          (name.strip(), phone.strip() if phone else None, shop.strip() if shop else None, area.strip() if area else None))
+                c.execute("INSERT INTO customers(name, phone, shop_name, area, created_by, created_at) VALUES (?,?,?,?,?,?)",
+                          (name.strip(), phone.strip() if phone else None, shop.strip() if shop else None, area.strip() if area else None, current_user(), date.today().isoformat()))
                 conn.commit()
+                log_activity(f"Added customer {name}")
                 st.success("Customer added")
                 run_rerun()
             else:
@@ -603,12 +946,15 @@ elif page == "Customers":
 
     if not customers.empty:
         for _, row in customers.iterrows():
-            col1,col2,col3,col4,col5,col6 = st.columns([3,2,2,2,2,1])
+            col1,col2,col3,col4,col5,col6,col7,col8 = st.columns([2,2,2,2,2,2,2,1])
             col1.write(row["name"])
             col2.write(row["phone"])
             col3.write(row["shop_name"])
             col4.write(row["area"])
-            if col5.button("✏️ Edit", key=f"cust_edit_{row['id']}"):
+            col5.write(f"By: {row['created_by']}")
+            col6.write(f"Upd: {row['updated_by']}")
+            col7.write(row['updated_at'])
+            if col8.button("✏️ Edit", key=f"cust_edit_{row['id']}"):
                 st.session_state.edit_customer_id = int(row["id"])
             if col6.button("🗑", key=f"cust_del_{row['id']}"):
                 c.execute("DELETE FROM customers WHERE id=?", (int(row["id"]),))
@@ -624,12 +970,38 @@ elif page == "Customers":
                 new_shop = st.text_input("Shop Name", cust["shop_name"])
                 new_area = st.text_input("Area", cust["area"])
                 if st.form_submit_button("Update Customer"):
-                    c.execute("UPDATE customers SET name=?, phone=?, shop_name=?, area=? WHERE id=?",
+                    c.execute("UPDATE customers SET name=?, phone=?, shop_name=?, area=?, updated_by=?, updated_at=? WHERE id=?",
                               (new_name.strip(), new_phone.strip() if new_phone else None,
-                               new_shop.strip() if new_shop else None, new_area.strip() if new_area else None, cid))
+                               new_shop.strip() if new_shop else None, new_area.strip() if new_area else None, current_user(), date.today().isoformat(), cid))
                     conn.commit()
+                    log_activity(f"Updated customer {new_name}")
                     st.success("Customer updated")
                     del st.session_state.edit_customer_id
                     run_rerun()
     else:
         st.info("No customers added yet.")
+
+# -------------------- ADMIN ACTIVITY --------------------
+
+elif page == "Admin Activity":
+
+    if st.session_state.user["role"] != "admin":
+        st.error("Admins only 🚫")
+        st.stop()
+
+    st.title("🛡️ System Activity Log")
+
+    logs = pd.read_sql("""
+    SELECT 
+        id,
+        username,
+        action,
+        date
+    FROM activity_logs
+    ORDER BY id DESC
+""", conn)
+
+    if logs.empty:
+        st.info("No activity yet")
+    else:
+        st.dataframe(logs, use_container_width=True)
