@@ -1,3 +1,5 @@
 *.db
 __pycache__/
 .env
+auth_session.txt
+.streamlit/
