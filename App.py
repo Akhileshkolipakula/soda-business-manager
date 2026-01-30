@@ -7,6 +7,14 @@ import plotly.express as px
 import os
 import hashlib
 
+# ---------------- CLOUD SAFE SESSION ----------------
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if "page" not in st.session_state:
+    st.session_state.page = "Dashboard"
+
 # -------------------- DATABASE --------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "soda_business.db")
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -280,7 +288,7 @@ if st.session_state.user is None:
                     "username": username,
                     "role": user[1]
                 }
-                save_session(st.session_state.user, "Dashboard")
+
                 st.success("Login successful")
                 st.rerun()
             else:
@@ -309,12 +317,10 @@ if st.session_state.user is None:
 
 # ---------- LOGOUT ----------
 st.sidebar.write(f"👤 {st.session_state.user['username']}")
+st.session_state.user = None
+st.session_state.page = "Dashboard"
+st.rerun()
 
-if st.sidebar.button("Logout"):
-
-    clear_session()
-    st.session_state.user = None
-    st.rerun()
 
 # -------------------- SIDEBAR --------------------
 st.sidebar.title("🥤 Soda Manager")
