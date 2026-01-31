@@ -27,7 +27,6 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 DB_PORT = os.getenv("DB_PORT")
-DEBUG_SESSIONS = os.getenv("DEBUG_SESSIONS", "0")
 
 @st.cache_resource
 def get_conn():
@@ -279,8 +278,6 @@ if auth_token:
     # validate token in device_sessions
     c.execute("SELECT user_id FROM device_sessions WHERE token=%s", (auth_token,))
     row = c.fetchone()
-    if DEBUG_SESSIONS == "1":
-        st.warning(f"DEBUG: qp={qp} auth_token={auth_token} db_row={row}")
     if row:
         uid = row[0]
         # fetch user details
