@@ -146,6 +146,13 @@ def create_tables():
 
 create_tables()
 
+# Ensure `expires_at` column exists on older DBs
+try:
+    c.execute("ALTER TABLE device_sessions ADD COLUMN IF NOT EXISTS expires_at TEXT")
+    conn.commit()
+except Exception:
+    pass
+
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Soda Business Manager", layout="wide")
 # APP_PASSWORD = "soda123"
@@ -158,12 +165,14 @@ def run_rerun():
     st.rerun()
 
 # -------------------- HELPERS --------------------
+@st.cache_data(ttl=60)
 def get_flavors():
     df = pd.read_sql("SELECT * FROM flavors ORDER BY flavor_name", conn)
     if "flavor_name" in df.columns:
         df["flavor_name"] = df["flavor_name"].fillna("Unknown flavor")
     return df
 
+@st.cache_data(ttl=30)
 def get_products():
     df = pd.read_sql("""
         SELECT p.id, p.flavor_id, p.cost_price, p.selling_price, p.stock, f.flavor_name, p.created_by, p.created_at, p.updated_by, p.updated_at
@@ -181,6 +190,7 @@ def get_products():
         df["selling_price"] = df["selling_price"].fillna(0.0).astype(float)
     return df
 
+@st.cache_data(ttl=60)
 def get_customers():
     df = pd.read_sql("SELECT * FROM customers ORDER BY name", conn)
     return df
@@ -359,25 +369,25 @@ def render_login():
     tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
-        remember = st.checkbox("Remember me on this device", key="login_remember")
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_user")
+            password = st.text_input("Password", type="password", key="login_pass")
+            remember = st.checkbox("Remember me on this device", key="login_remember")
+            submit = st.form_submit_button("Login")
 
-        if st.button("Login"):
+        if submit:
             user = verify_user(username, password)
             if user:
                 st.session_state.user = {"id": user[0], "username": username, "role": user[1]}
                 st.session_state.logged_in = True
                 st.session_state.page = "Dashboard"
-                st.success("Login successful")
-                # create a per-device token, store server-side and set in client's localStorage
+                # create a per-device token, store server-side and set in client's storage
                 try:
                     token = uuid.uuid4().hex
-                    # compute expiry: long if remembered, short if session-only
+                    # compute expiry: long if remembered, shorter if session-only
                     if remember:
                         expires = (date.today() + timedelta(days=30)).isoformat()
                     else:
-                        # session-only: still record an expiry to help cleanup (short window)
                         expires = (date.today() + timedelta(days=7)).isoformat()
 
                     c.execute("INSERT INTO device_sessions(token,user_id,created_at,expires_at) VALUES (%s,%s,%s,%s)",
@@ -389,7 +399,6 @@ def render_login():
                     components.html(js, height=0)
                     st.stop()
                 except Exception:
-                    # fallback to simple rerun
                     run_rerun()
             else:
                 st.error("Invalid credentials")
