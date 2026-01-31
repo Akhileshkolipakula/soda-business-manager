@@ -1,13 +1,11 @@
 # app.py
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import date
 import plotly.express as px
 import os
 import hashlib
 import psycopg2
-import uuid
-import streamlit.components.v1 as components
 
 # ---------------- SESSION INIT ----------------
 
@@ -40,6 +38,7 @@ def get_conn():
 
 conn = get_conn()
 c = conn.cursor()
+
 
 # -------------------- TABLES --------------------
 
@@ -132,26 +131,10 @@ def create_tables():
     );
     """)
 
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS device_sessions (
-        token TEXT PRIMARY KEY,
-        user_id INTEGER,
-        created_at TEXT,
-        expires_at TEXT
-    );
-    """)
-
     conn.commit()
 
 
 create_tables()
-
-# Ensure `expires_at` column exists on older DBs
-try:
-    c.execute("ALTER TABLE device_sessions ADD COLUMN IF NOT EXISTS expires_at TEXT")
-    conn.commit()
-except Exception:
-    pass
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Soda Business Manager", layout="wide")
@@ -165,14 +148,12 @@ def run_rerun():
     st.rerun()
 
 # -------------------- HELPERS --------------------
-@st.cache_data(ttl=60)
 def get_flavors():
     df = pd.read_sql("SELECT * FROM flavors ORDER BY flavor_name", conn)
     if "flavor_name" in df.columns:
         df["flavor_name"] = df["flavor_name"].fillna("Unknown flavor")
     return df
 
-@st.cache_data(ttl=30)
 def get_products():
     df = pd.read_sql("""
         SELECT p.id, p.flavor_id, p.cost_price, p.selling_price, p.stock, f.flavor_name, p.created_by, p.created_at, p.updated_by, p.updated_at
@@ -190,7 +171,6 @@ def get_products():
         df["selling_price"] = df["selling_price"].fillna(0.0).astype(float)
     return df
 
-@st.cache_data(ttl=60)
 def get_customers():
     df = pd.read_sql("SELECT * FROM customers ORDER BY name", conn)
     return df
@@ -259,109 +239,10 @@ def log_activity(action):
 # session state `user` initialized earlier; we'll keep sessions in-memory per device
 
 # Create first admin (only if no users exist)
-c.execute("SELECT COUNT(*) FROM users")
-user_count = c.fetchone()[0]
+user_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
 if user_count == 0:
     create_user("admin", "admin123", "admin")
-
-
-# -- Helper to read query params with fallbacks
-def _get_query_params():
-    try:
-        return st.experimental_get_query_params()
-    except Exception:
-        try:
-            return st.query_params
-        except Exception:
-            return {}
-
-
-# Attempt device-token based restore: client-side localStorage -> URL param -> server validation
-qp = _get_query_params()
-auth_token = None
-if isinstance(qp, dict):
-    auth_token = qp.get("auth_token")
-    if isinstance(auth_token, list):
-        auth_token = auth_token[0] if auth_token else None
-
-# Support a clear_token flow (used on logout) where client JS sends the token to be
-# removed server-side. If present, delete the session and clear client storage.
-clear_token = None
-if isinstance(qp, dict):
-    clear_token = qp.get("clear_token")
-    if isinstance(clear_token, list):
-        clear_token = clear_token[0] if clear_token else None
-
-if clear_token and auth_token:
-    try:
-        c.execute("DELETE FROM device_sessions WHERE token=%s", (auth_token,))
-        conn.commit()
-    except Exception:
-        pass
-    components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
-    st.stop()
-
-if auth_token:
-    # validate token in device_sessions and check expiry
-    c.execute("SELECT user_id, expires_at FROM device_sessions WHERE token=%s", (auth_token,))
-    row = c.fetchone()
-    if row:
-        uid = row[0]
-        expires_at = row[1]
-        # if an expiry exists, check it
-        if expires_at:
-            try:
-                exp_date = datetime.fromisoformat(expires_at).date()
-                if date.today() > exp_date:
-                    # expired: remove token, clear client storage and reload
-                    try:
-                        c.execute("DELETE FROM device_sessions WHERE token=%s", (auth_token,))
-                        conn.commit()
-                    except Exception:
-                        pass
-                    components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
-                    st.stop()
-            except Exception:
-                pass
-
-        # fetch user details
-        c.execute("SELECT id, username, role FROM users WHERE id=%s", (uid,))
-        u = c.fetchone()
-        if u:
-            st.session_state.user = {"id": u[0], "username": u[1], "role": u[2]}
-            st.session_state.logged_in = True
-            st.session_state.page = "Dashboard"
-        else:
-            # invalid user; clear client storage and reload clean URL
-            components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
-            st.stop()
-    else:
-        # invalid token: clear storages and reload
-        components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
-        st.stop()
-else:
-    # no token param: inject JS to send local token (once) if present
-    components.html(
-        """
-        <script>
-        (function(){
-            try{
-                const url = new URL(window.location.href);
-                if(!url.searchParams.get('auth_attempt')){
-                    const t = localStorage.getItem('soda_auth_token') || sessionStorage.getItem('soda_auth_token');
-                    if(t){
-                        url.searchParams.set('auth_token', t);
-                        url.searchParams.set('auth_attempt','1');
-                        window.location.href = url.toString();
-                    }
-                }
-            }catch(e){}
-        })();
-        </script>
-        """,
-        height=0,
-    )
 
 
 def render_login():
@@ -369,37 +250,18 @@ def render_login():
     tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
-        with st.form("login_form"):
-            username = st.text_input("Username", key="login_user")
-            password = st.text_input("Password", type="password", key="login_pass")
-            remember = st.checkbox("Remember me on this device", key="login_remember")
-            submit = st.form_submit_button("Login")
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
+        remember = st.checkbox("Remember me on this device", key="login_remember")
 
-        if submit:
+        if st.button("Login"):
             user = verify_user(username, password)
             if user:
                 st.session_state.user = {"id": user[0], "username": username, "role": user[1]}
                 st.session_state.logged_in = True
                 st.session_state.page = "Dashboard"
-                # create a per-device token, store server-side and set in client's storage
-                try:
-                    token = uuid.uuid4().hex
-                    # compute expiry: long if remembered, shorter if session-only
-                    if remember:
-                        expires = (date.today() + timedelta(days=30)).isoformat()
-                    else:
-                        expires = (date.today() + timedelta(days=7)).isoformat()
-
-                    c.execute("INSERT INTO device_sessions(token,user_id,created_at,expires_at) VALUES (%s,%s,%s,%s)",
-                              (token, st.session_state.user["id"], date.today().isoformat(), expires))
-                    conn.commit()
-                    # set storage on client: localStorage when remembered, sessionStorage when not
-                    remember_js = 'true' if remember else 'false'
-                    js = f"<script>try{{const tk='{token}'; if({remember_js}){{localStorage.setItem('soda_auth_token', tk);}}else{{sessionStorage.setItem('soda_auth_token', tk);}} window.location.href=window.location.pathname + '?auth_token=' + tk;}}catch(e){{window.location.href=window.location.pathname;}}</script>"
-                    components.html(js, height=0)
-                    st.stop()
-                except Exception:
-                    run_rerun()
+                st.success("Login successful")
+                st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
 
@@ -430,34 +292,7 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
-    # clear client-side stored device token for this browser and request server to delete it
-    components.html(
-        """
-        <script>
-        (function(){
-            try{
-                const t = localStorage.getItem('soda_auth_token') || sessionStorage.getItem('soda_auth_token');
-                if(t){
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('clear_token','1');
-                    url.searchParams.set('auth_token', t);
-                    window.location.href = url.toString();
-                }else{
-                    localStorage.removeItem('soda_auth_token');
-                    sessionStorage.removeItem('soda_auth_token');
-                    window.location.href = window.location.pathname;
-                }
-            }catch(e){
-                localStorage.removeItem('soda_auth_token');
-                sessionStorage.removeItem('soda_auth_token');
-                window.location.href = window.location.pathname;
-            }
-        })();
-        </script>
-        """,
-        height=0,
-    )
-    st.stop()
+    st.experimental_rerun()
 
 # -------------------- ROLE & PAGES --------------------
 role = st.session_state.user.get("role", "staff")
