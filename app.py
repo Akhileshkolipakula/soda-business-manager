@@ -6,6 +6,8 @@ import plotly.express as px
 import os
 import hashlib
 import psycopg2
+import uuid
+import streamlit.components.v1 as components
 
 # ---------------- SESSION INIT ----------------
 
@@ -130,6 +132,14 @@ def create_tables():
     );
     """)
 
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS device_sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER,
+        created_at TEXT
+    );
+    """)
+
     conn.commit()
 
 
@@ -245,6 +255,70 @@ if user_count == 0:
     create_user("admin", "admin123", "admin")
 
 
+# -- Helper to read query params with fallbacks
+def _get_query_params():
+    try:
+        return st.experimental_get_query_params()
+    except Exception:
+        try:
+            return st.query_params
+        except Exception:
+            return {}
+
+
+# Attempt device-token based restore: client-side localStorage -> URL param -> server validation
+qp = _get_query_params()
+auth_token = None
+if isinstance(qp, dict):
+    auth_token = qp.get("auth_token")
+    if isinstance(auth_token, list):
+        auth_token = auth_token[0] if auth_token else None
+
+if auth_token:
+    # validate token in device_sessions
+    c.execute("SELECT user_id FROM device_sessions WHERE token=%s", (auth_token,))
+    row = c.fetchone()
+    if row:
+        uid = row[0]
+        # fetch user details
+        c.execute("SELECT id, username, role FROM users WHERE id=%s", (uid,))
+        u = c.fetchone()
+        if u:
+            st.session_state.user = {"id": u[0], "username": u[1], "role": u[2]}
+            st.session_state.logged_in = True
+            st.session_state.page = "Dashboard"
+        else:
+            # invalid user; clear client token and reload clean URL
+            components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+            st.stop()
+    else:
+        # invalid token: clear localStorage and reload clean URL
+        components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+        st.stop()
+else:
+    # no token param: inject JS to send local token (once) if present
+    components.html(
+        """
+        <script>
+        (function(){
+            try{
+                const url = new URL(window.location.href);
+                if(!url.searchParams.get('auth_attempt')){
+                    const t = localStorage.getItem('soda_auth_token');
+                    if(t){
+                        url.searchParams.set('auth_token', t);
+                        url.searchParams.set('auth_attempt','1');
+                        window.location.href = url.toString();
+                    }
+                }
+            }catch(e){}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_login():
     st.title("🔐 Login")
     tab1, tab2 = st.tabs(["Login", "Register"])
@@ -261,7 +335,19 @@ def render_login():
                 st.session_state.logged_in = True
                 st.session_state.page = "Dashboard"
                 st.success("Login successful")
-                run_rerun()
+                # create a per-device token, store server-side and set in client's localStorage
+                try:
+                    token = uuid.uuid4().hex
+                    c.execute("INSERT INTO device_sessions(token,user_id,created_at) VALUES (%s,%s,%s)",
+                              (token, st.session_state.user["id"], date.today().isoformat()))
+                    conn.commit()
+                    # set localStorage and reload with auth_token param so server validates and restores session
+                    js = f"<script>localStorage.setItem('soda_auth_token', '{token}');window.location.href=window.location.pathname + '?auth_token={token}';</script>"
+                    components.html(js, height=0)
+                    st.stop()
+                except Exception:
+                    # fallback to simple rerun
+                    run_rerun()
             else:
                 st.error("Invalid credentials")
 
@@ -292,7 +378,9 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
-    run_rerun()
+    # clear client-side stored device token for this browser
+    components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+    st.stop()
 
 # -------------------- ROLE & PAGES --------------------
 role = st.session_state.user.get("role", "staff")
