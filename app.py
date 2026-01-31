@@ -1,116 +1,139 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import sqlite3
 from datetime import date
 import plotly.express as px
 import os
 import hashlib
+import psycopg2
 
-# -------------------- DATABASE --------------------
-DB_PATH = os.path.join(os.path.dirname(__file__), "soda_business.db")
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+# ---------------- SESSION INIT ----------------
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if "page" not in st.session_state:
+    st.session_state.page = "Login"
+
+# ---------------- POSTGRES CONNECTION ----------------
+
+DB_HOST = os.getenv("DB_HOST")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASS")
+DB_PORT = os.getenv("DB_PORT")
+
+@st.cache_resource
+def get_conn():
+    return psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASS,
+        port=DB_PORT
+    )
+
+conn = get_conn()
 c = conn.cursor()
 
 # -------------------- TABLES --------------------
-c.executescript("""
-CREATE TABLE IF NOT EXISTS flavors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    flavor_name TEXT UNIQUE
-);
 
-CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    flavor_id INTEGER,
-    cost_price REAL,
-    selling_price REAL,
-    stock INTEGER,
-    FOREIGN KEY(flavor_id) REFERENCES flavors(id)
-);
+def create_tables():
 
-CREATE TABLE IF NOT EXISTS stock_additions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER,
-    date TEXT,
-    quantity INTEGER,
-    batch_cost REAL,
-    FOREIGN KEY(product_id) REFERENCES products(id)
-);
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS flavors (
+        id SERIAL PRIMARY KEY,
+        flavor_name TEXT UNIQUE
+    );
+    """)
 
-CREATE TABLE IF NOT EXISTS customers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    phone TEXT,
-    shop_name TEXT,
-    area TEXT
-);
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        flavor_id INTEGER REFERENCES flavors(id),
+        cost_price FLOAT,
+        selling_price FLOAT,
+        stock INTEGER DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT,
+        updated_by TEXT,
+        updated_at TEXT
+    );
+    """)
 
-CREATE TABLE IF NOT EXISTS sales (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER,
-    date TEXT,
-    quantity INTEGER,
-    revenue REAL,
-    customer_id INTEGER,
-    FOREIGN KEY(product_id) REFERENCES products(id),
-    FOREIGN KEY(customer_id) REFERENCES customers(id)
-);
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS stock_additions (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER REFERENCES products(id),
+        date TEXT,
+        quantity INTEGER,
+        batch_cost FLOAT,
+        created_by TEXT,
+        created_at TEXT
+    );
+    """)
 
-CREATE TABLE IF NOT EXISTS investments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT,
-    amount REAL,
-    note TEXT
-);
-                
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password_hash TEXT,
-    role TEXT DEFAULT 'staff'
-);
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS customers (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        phone TEXT,
+        shop_name TEXT,
+        area TEXT,
+        created_by TEXT,
+        created_at TEXT,
+        updated_by TEXT,
+        updated_at TEXT
+    );
+    """)
 
--- Activity Log
-CREATE TABLE IF NOT EXISTS activity_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    action TEXT,
-    date TEXT
-);
-""")
-conn.commit()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS sales (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER REFERENCES products(id),
+        date TEXT,
+        quantity INTEGER,
+        revenue FLOAT,
+        customer_id INTEGER REFERENCES customers(id),
+        created_by TEXT,
+        created_at TEXT
+    );
+    """)
 
-# -------------------- AUTO MIGRATION (SAFE) --------------------
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS investments (
+        id SERIAL PRIMARY KEY,
+        date TEXT,
+        amount FLOAT,
+        note TEXT
+    );
+    """)
 
-def add_column_if_not_exists(table, column, col_type):
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE,
+        password_hash TEXT,
+        role TEXT DEFAULT 'staff'
+    );
+    """)
 
-    cols = c.execute(f"PRAGMA table_info({table})").fetchall()
-    col_names = [col[1] for col in cols]
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id SERIAL PRIMARY KEY,
+        username TEXT,
+        action TEXT,
+        date TEXT
+    );
+    """)
 
-    if column not in col_names:
-        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        conn.commit()
+    conn.commit()
 
 
-# Products
-add_column_if_not_exists("products", "created_by", "TEXT")
-add_column_if_not_exists("products", "updated_by", "TEXT")
-add_column_if_not_exists("products", "created_at", "TEXT")
-add_column_if_not_exists("products", "updated_at", "TEXT")
-
-# Customers
-add_column_if_not_exists("customers", "created_by", "TEXT")
-add_column_if_not_exists("customers", "updated_by", "TEXT")
-add_column_if_not_exists("customers", "created_at", "TEXT")
-add_column_if_not_exists("customers", "updated_at", "TEXT")
-
-# Stock
-add_column_if_not_exists("stock_additions", "created_by", "TEXT")
-add_column_if_not_exists("stock_additions", "created_at", "TEXT")
-
-# Sales
-add_column_if_not_exists("sales", "created_by", "TEXT")
-add_column_if_not_exists("sales", "created_at", "TEXT")
+create_tables()
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Soda Business Manager", layout="wide")
@@ -154,54 +177,6 @@ def get_customers():
 # ensure helpers re-evaluate when refresh flag toggles
 _ = st.session_state.get("_refresh_flag", False)
 
-# -------------------- SESSION PERSISTENCE --------------------
-
-SESSION_FILE = "auth_session.txt"
-
-
-def save_session(user, page="Dashboard"):
-    with open(SESSION_FILE, "w") as f:
-        f.write(f"{user['id']}|{user['username']}|{user['role']}|{page}")
-
-
-def load_session():
-
-    if not os.path.exists(SESSION_FILE):
-        return None
-
-    try:
-        with open(SESSION_FILE) as f:
-            data = f.read().strip()
-
-        if not data:
-            return None
-
-        uid, uname, role, page = data.split("|")
-
-        return {
-            "id": int(uid),
-            "username": uname,
-            "role": role,
-            "page": page
-        }
-
-    except:
-        return None
-
-
-def clear_session():
-    """Remove persisted session file and reset Streamlit session state."""
-    try:
-        if os.path.exists(SESSION_FILE):
-            os.remove(SESSION_FILE)
-    except Exception:
-        pass
-
-    # reset session-related state
-    st.session_state.user = None
-    st.session_state.authenticated = False
-    st.session_state.page = "Dashboard"
-
 # -------------------- AUTH HELPERS -----------------
 
 def hash_password(password):
@@ -211,24 +186,28 @@ def hash_password(password):
 def create_user(username, password, role="staff"):
     try:
         c.execute("""
-        INSERT INTO users(username,password_hash,role)
-        VALUES(?,?,?)
+            INSERT INTO users(username,password_hash,role)
+            VALUES (%s,%s,%s)
         """, (username, hash_password(password), role))
+
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         return False
 
-
 def verify_user(username, password):
+
     hashed = hash_password(password)
 
-    user = c.execute("""
-        SELECT id, role FROM users
-        WHERE username=? AND password_hash=?
-    """, (username, hashed)).fetchone()
+    c.execute("""
+        SELECT id, role
+        FROM users
+        WHERE username=%s AND password_hash=%s
+    """, (username, hashed))
 
-    return user
+    return c.fetchone()
 
 # -------------------- AUDIT HELPERS --------------------
 
@@ -245,7 +224,7 @@ def log_activity(action):
 
     c.execute("""
         INSERT INTO activity_logs(username,action,date)
-        VALUES (?,?,?)
+        VALUES (%s,%s,%s)
     """, (
         user["username"],
         action,
@@ -256,14 +235,7 @@ def log_activity(action):
 
 # -------------------- AUTH (MULTI USER) --------------------
 
-if "user" not in st.session_state:
-
-    saved = load_session()
-
-    if saved:
-        st.session_state.user = saved
-    else:
-        st.session_state.user = None
+# session state `user` initialized earlier; we'll keep sessions in-memory per device
 
 # Create first admin (only if no users exist)
 user_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -272,77 +244,60 @@ if user_count == 0:
     create_user("admin", "admin123", "admin")
 
 
-if st.session_state.user is None:
-
+def render_login():
     st.title("🔐 Login")
-
     tab1, tab2 = st.tabs(["Login", "Register"])
 
-    # ---------- LOGIN ----------
     with tab1:
-
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
+        remember = st.checkbox("Remember me on this device", key="login_remember")
 
         if st.button("Login"):
-
             user = verify_user(username, password)
-
             if user:
-                st.session_state.user = {
-                    "id": user[0],
-                    "username": username,
-                    "role": user[1]
-                }
-                save_session(st.session_state.user, "Dashboard")
+                st.session_state.user = {"id": user[0], "username": username, "role": user[1]}
+                st.session_state.logged_in = True
+                st.session_state.page = "Dashboard"
                 st.success("Login successful")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
 
-    # ---------- REGISTER ----------
     with tab2:
-
-        new_user = st.text_input("New Username")
-        new_pass = st.text_input("New Password", type="password")
-
+        new_user = st.text_input("New Username", key="reg_user")
+        new_pass = st.text_input("New Password", type="password", key="reg_pass")
         if st.button("Register"):
-
             if len(new_pass) < 4:
                 st.error("Password too short")
             else:
                 ok = create_user(new_user, new_pass)
-
                 if ok:
                     st.success("Account created. Login now.")
                 else:
                     st.error("Username already exists")
 
+
+# If not logged in, show the login/register UI and stop
+if not st.session_state.get("logged_in", False) or not st.session_state.get("user"):
+    render_login()
     st.stop()
 
 
-# ---------- LOGOUT ----------
-st.sidebar.write(f"👤 {st.session_state.user['username']}")
-
-if st.sidebar.button("Logout"):
-
-    clear_session()
-    st.session_state.user = None
-    st.rerun()
-
-# -------------------- SIDEBAR --------------------
+# ---------- LOGOUT & SIDEBAR ----------
 st.sidebar.title("🥤 Soda Manager")
-# bind radio to session_state so we can change it programmatically
-# -------------------- ROLE BASED PAGES --------------------
+st.sidebar.write(f"👤 {st.session_state.user['username']}")
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.session_state.page = "Login"
+    st.experimental_rerun()
 
-role = st.session_state.user["role"]
+# -------------------- ROLE & PAGES --------------------
+role = st.session_state.user.get("role", "staff")
 
 # Pages for staff users
-user_pages = [
-    "Dashboard",
-    "Record Sale",
-    "Customers"
-]
+user_pages = ["Dashboard", "Record Sale", "Customers"]
 
 # Pages for admin
 admin_pages = [
@@ -355,36 +310,20 @@ admin_pages = [
     "Reports & Graphs",
     "Financial Summary",
     "Customers",
-    "Admin Activity"
+    "Admin Activity",
 ]
 
-# Select pages based on role
-if role == "admin":
-    pages = admin_pages
-else:
-    pages = user_pages
+pages = admin_pages if role == "admin" else user_pages
 
 default_page = st.session_state.get("page", "Dashboard")
-
 if default_page not in pages:
     default_page = "Dashboard"
 
-page = st.sidebar.radio(
-    "Navigation",
-    pages,
-    index=pages.index(default_page),
-    key="page"
-)
-
-# ---------------- SECURITY CHECK ----------------
+page = st.sidebar.radio("Navigation", pages, index=pages.index(default_page), key="page")
 
 if role != "admin" and page not in user_pages:
     st.error("Access Denied 🚫")
     st.stop()
-
-
-# Save current page
-save_session(st.session_state.user, page)
 
 # -------------------- DASHBOARD --------------------
 if page == "Dashboard":
@@ -456,7 +395,7 @@ elif page == "Flavors":
         if st.form_submit_button("Add Flavor"):
             if new_flavor and new_flavor.strip():
                 try:
-                    c.execute("INSERT INTO flavors(flavor_name) VALUES (?)", (new_flavor.strip(),))
+                    c.execute("INSERT INTO flavors(flavor_name) VALUES (%s)", (new_flavor.strip(),))
                     conn.commit()
                     st.success("Flavor added")
                     run_rerun()
@@ -472,7 +411,7 @@ elif page == "Flavors":
             if col2.button("✏️ Edit", key=f"edit_flavor_{row['id']}"):
                 st.session_state.edit_flavor_id = int(row["id"])
             if col3.button("🗑", key=f"del_flavor_{row['id']}"):
-                c.execute("DELETE FROM flavors WHERE id=?", (int(row["id"]),))
+                c.execute("DELETE FROM flavors WHERE id=%s", (int(row["id"]),))
                 conn.commit()
                 st.success("Flavor deleted")
                 run_rerun()
@@ -482,7 +421,7 @@ elif page == "Flavors":
             with st.form("edit_flavor"):
                 new_name = st.text_input("Flavor Name", flavor_row["flavor_name"])
                 if st.form_submit_button("Update Flavor"):
-                    c.execute("UPDATE flavors SET flavor_name=? WHERE id=?", (new_name.strip(), fid))
+                    c.execute("UPDATE flavors SET flavor_name=%s WHERE id=%s", (new_name.strip(), fid))
                     conn.commit()
                     st.success("Flavor updated")
                     del st.session_state.edit_flavor_id
@@ -507,7 +446,7 @@ elif page == "Products":
         stock = st.number_input("Initial Stock", min_value=0, step=1, value=0)
         if st.form_submit_button("Add Product"):
             flavor_id = int(flavor_choice["id"])
-            c.execute("INSERT INTO products(flavor_id, cost_price, selling_price, stock, created_by, created_at) values (?,?,?,?,?,?)",
+            c.execute("INSERT INTO products(flavor_id, cost_price, selling_price, stock, created_by, created_at) values (%s,%s,%s,%s,%s,%s)",
                       (flavor_id, float(cost), float(price), int(stock), current_user(), date.today().isoformat()))
             conn.commit()
             log_activity(f"Added product for flavor {flavor_choice['flavor_name']}")
@@ -527,7 +466,7 @@ elif page == "Products":
             if col5.button("✏️ Edit", key=f"edit_prod_{row['id']}"):
                 st.session_state.edit_product_id = int(row["id"])
             if col6.button("🗑", key=f"del_prod_{row['id']}"):
-                c.execute("DELETE FROM products WHERE id=?", (int(row["id"]),))
+                c.execute("DELETE FROM products WHERE id=%s", (int(row["id"]),))
                 conn.commit()
                 st.success("Product deleted")
                 run_rerun()
@@ -547,7 +486,7 @@ elif page == "Products":
                 stock = st.number_input("Stock", value=int(prod["stock"]), step=1)
                 if st.form_submit_button("Update Product"):
                     flavor_id = int(flavor_choice["id"])
-                    c.execute("UPDATE products SET flavor_id=?, cost_price=?, selling_price=?, stock=?, updated_by=?, updated_at=? WHERE id=?",
+                    c.execute("UPDATE products SET flavor_id=%s, cost_price=%s, selling_price=%s, stock=%s, updated_by=%s, updated_at=%s WHERE id=%s",
                               (flavor_id, float(cost), float(price), int(stock), current_user(), date.today().isoformat(), pid))
                     conn.commit()
                     log_activity(f"Updated product {flavor_choice['flavor_name']}")
@@ -596,9 +535,9 @@ elif page == "Add Stock":
         if st.form_submit_button("Add Stock"):
             pid = int(sel["id"])
             # Insert computed batch_cost into stock_additions and update product stock
-            c.execute("INSERT INTO stock_additions(product_id,date,quantity,batch_cost, created_by,created_at) VALUES (?,?,?,?,?,?)",
+            c.execute("INSERT INTO stock_additions(product_id,date,quantity,batch_cost, created_by,created_at) VALUES (%s,%s,%s,%s,%s,%s)",
                       (pid, d.isoformat(), int(qty), float(batch_cost), current_user(), date.today().isoformat()))
-            c.execute("UPDATE products SET stock = stock + ? WHERE id=?", (int(qty), pid))
+            c.execute("UPDATE products SET stock = stock + %s WHERE id=%s", (int(qty), pid))
             conn.commit()
             log_activity(f"Added {qty} stock to {sel['flavor_name']}")
             # Show a simple confirmation; batch cost is already visible in the input above
@@ -747,7 +686,7 @@ elif page == "Record Sale":
                     name, phone, shop_name, area,
                     created_by, created_at
                 )
-                VALUES (?,?,?,?,?,?)
+                VALUES (%s,%s,%s,%s,%s,%s)
             """, (
                 new_cust_name.strip(),
                 new_cust_phone.strip() if new_cust_phone else None,
@@ -759,17 +698,17 @@ elif page == "Record Sale":
 
             conn.commit()
 
-            customer_id = c.lastrowid
-
+            c.execute("SELECT LASTVAL()")
+            customer_id = c.fetchone()[0]
 
         else:
 
             # Update existing customer
             c.execute("""
                 UPDATE customers
-                SET name=?, phone=?, shop_name=?, area=?,
-                    updated_by=?, updated_at=?
-                WHERE id=?
+                SET name=%s, phone=%s, shop_name=%s, area=%s,
+                    updated_by=%s, updated_at=%s
+                WHERE id=%s
             """, (
                 name_val.strip(),
                 phone_val.strip() if phone_val else None,
@@ -800,7 +739,7 @@ elif page == "Record Sale":
                 created_by,
                 created_at
             )
-            VALUES (?,?,?,?,?,?,?)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
         """, (
             int(sel["id"]),
             d.isoformat(),
@@ -815,8 +754,8 @@ elif page == "Record Sale":
         # Update stock
         c.execute("""
             UPDATE products
-            SET stock = stock - ?
-            WHERE id=?
+            SET stock = stock - %s
+            WHERE id=%s
         """, (
             int(qty),
             int(sel["id"])
@@ -869,7 +808,7 @@ elif page == "Company Investment":
         amt = st.number_input("Investment Amount", min_value=0.0, format="%.2f")
         note = st.text_input("Note")
         if st.form_submit_button("Add Investment"):
-            c.execute("INSERT INTO investments(date,amount,note) VALUES (?,?,?)",
+            c.execute("INSERT INTO investments(date,amount,note) VALUES (%s,%s,%s)",
                       (date.today().isoformat(), float(amt), note.strip() if note else None))
             conn.commit()
             st.success("Investment added")
@@ -984,7 +923,7 @@ elif page == "Customers":
         area = st.text_input("Area")
         if st.form_submit_button("Add Customer"):
             if name and name.strip():
-                c.execute("INSERT INTO customers(name, phone, shop_name, area, created_by, created_at) VALUES (?,?,?,?,?,?)",
+                c.execute("INSERT INTO customers(name, phone, shop_name, area, created_by, created_at) VALUES (%s,%s,%s,%s,%s,%s)",
                           (name.strip(), phone.strip() if phone else None, shop.strip() if shop else None, area.strip() if area else None, current_user(), date.today().isoformat()))
                 conn.commit()
                 log_activity(f"Added customer {name}")
@@ -1009,7 +948,7 @@ elif page == "Customers":
             if st.session_state.user["role"] == "admin":
 
                 if col6.button("🗑", key=f"cust_del_{row['id']}"):
-                    c.execute("DELETE FROM customers WHERE id=?", (int(row["id"]),))
+                    c.execute("DELETE FROM customers WHERE id=%s", (int(row["id"]),))
                     conn.commit()
                     st.success("Customer deleted")
                     run_rerun()
@@ -1023,7 +962,7 @@ elif page == "Customers":
                 new_shop = st.text_input("Shop Name", cust["shop_name"])
                 new_area = st.text_input("Area", cust["area"])
                 if st.form_submit_button("Update Customer"):
-                    c.execute("UPDATE customers SET name=?, phone=?, shop_name=?, area=?, updated_by=?, updated_at=? WHERE id=?",
+                    c.execute("UPDATE customers SET name=%s, phone=%s, shop_name=%s, area=%s, updated_by=%s, updated_at=%s WHERE id=%s",
                               (new_name.strip(), new_phone.strip() if new_phone else None,
                                new_shop.strip() if new_shop else None, new_area.strip() if new_area else None, current_user(), date.today().isoformat(), cid))
                     conn.commit()
