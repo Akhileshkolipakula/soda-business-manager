@@ -239,7 +239,8 @@ def log_activity(action):
 # session state `user` initialized earlier; we'll keep sessions in-memory per device
 
 # Create first admin (only if no users exist)
-user_count = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+c.execute("SELECT COUNT(*) FROM users")
+user_count = c.fetchone()[0]
 
 if user_count == 0:
     create_user("admin", "admin123", "admin")
