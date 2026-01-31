@@ -261,7 +261,7 @@ def render_login():
                 st.session_state.logged_in = True
                 st.session_state.page = "Dashboard"
                 st.success("Login successful")
-                st.experimental_rerun()
+                run_rerun()
             else:
                 st.error("Invalid credentials")
 
@@ -292,7 +292,7 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
-    st.experimental_rerun()
+    run_rerun()
 
 # -------------------- ROLE & PAGES --------------------
 role = st.session_state.user.get("role", "staff")
