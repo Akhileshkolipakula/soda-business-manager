@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime, timedelta
 import plotly.express as px
 import os
 import hashlib
@@ -136,7 +136,8 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS device_sessions (
         token TEXT PRIMARY KEY,
         user_id INTEGER,
-        created_at TEXT
+        created_at TEXT,
+        expires_at TEXT
     );
     """)
 
@@ -274,12 +275,46 @@ if isinstance(qp, dict):
     if isinstance(auth_token, list):
         auth_token = auth_token[0] if auth_token else None
 
+# Support a clear_token flow (used on logout) where client JS sends the token to be
+# removed server-side. If present, delete the session and clear client storage.
+clear_token = None
+if isinstance(qp, dict):
+    clear_token = qp.get("clear_token")
+    if isinstance(clear_token, list):
+        clear_token = clear_token[0] if clear_token else None
+
+if clear_token and auth_token:
+    try:
+        c.execute("DELETE FROM device_sessions WHERE token=%s", (auth_token,))
+        conn.commit()
+    except Exception:
+        pass
+    components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+    st.stop()
+
 if auth_token:
-    # validate token in device_sessions
-    c.execute("SELECT user_id FROM device_sessions WHERE token=%s", (auth_token,))
+    # validate token in device_sessions and check expiry
+    c.execute("SELECT user_id, expires_at FROM device_sessions WHERE token=%s", (auth_token,))
     row = c.fetchone()
     if row:
         uid = row[0]
+        expires_at = row[1]
+        # if an expiry exists, check it
+        if expires_at:
+            try:
+                exp_date = datetime.fromisoformat(expires_at).date()
+                if date.today() > exp_date:
+                    # expired: remove token, clear client storage and reload
+                    try:
+                        c.execute("DELETE FROM device_sessions WHERE token=%s", (auth_token,))
+                        conn.commit()
+                    except Exception:
+                        pass
+                    components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+                    st.stop()
+            except Exception:
+                pass
+
         # fetch user details
         c.execute("SELECT id, username, role FROM users WHERE id=%s", (uid,))
         u = c.fetchone()
@@ -288,12 +323,12 @@ if auth_token:
             st.session_state.logged_in = True
             st.session_state.page = "Dashboard"
         else:
-            # invalid user; clear client token and reload clean URL
-            components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+            # invalid user; clear client storage and reload clean URL
+            components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
             st.stop()
     else:
-        # invalid token: clear localStorage and reload clean URL
-        components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+        # invalid token: clear storages and reload
+        components.html("<script>localStorage.removeItem('soda_auth_token');sessionStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
         st.stop()
 else:
     # no token param: inject JS to send local token (once) if present
@@ -304,7 +339,7 @@ else:
             try{
                 const url = new URL(window.location.href);
                 if(!url.searchParams.get('auth_attempt')){
-                    const t = localStorage.getItem('soda_auth_token');
+                    const t = localStorage.getItem('soda_auth_token') || sessionStorage.getItem('soda_auth_token');
                     if(t){
                         url.searchParams.set('auth_token', t);
                         url.searchParams.set('auth_attempt','1');
@@ -338,11 +373,19 @@ def render_login():
                 # create a per-device token, store server-side and set in client's localStorage
                 try:
                     token = uuid.uuid4().hex
-                    c.execute("INSERT INTO device_sessions(token,user_id,created_at) VALUES (%s,%s,%s)",
-                              (token, st.session_state.user["id"], date.today().isoformat()))
+                    # compute expiry: long if remembered, short if session-only
+                    if remember:
+                        expires = (date.today() + timedelta(days=30)).isoformat()
+                    else:
+                        # session-only: still record an expiry to help cleanup (short window)
+                        expires = (date.today() + timedelta(days=7)).isoformat()
+
+                    c.execute("INSERT INTO device_sessions(token,user_id,created_at,expires_at) VALUES (%s,%s,%s,%s)",
+                              (token, st.session_state.user["id"], date.today().isoformat(), expires))
                     conn.commit()
-                    # set localStorage and reload with auth_token param so server validates and restores session
-                    js = f"<script>localStorage.setItem('soda_auth_token', '{token}');window.location.href=window.location.pathname + '?auth_token={token}';</script>"
+                    # set storage on client: localStorage when remembered, sessionStorage when not
+                    remember_js = 'true' if remember else 'false'
+                    js = f"<script>try{{const tk='{token}'; if({remember_js}){{localStorage.setItem('soda_auth_token', tk);}}else{{sessionStorage.setItem('soda_auth_token', tk);}} window.location.href=window.location.pathname + '?auth_token=' + tk;}}catch(e){{window.location.href=window.location.pathname;}}</script>"
                     components.html(js, height=0)
                     st.stop()
                 except Exception:
@@ -378,8 +421,33 @@ if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
-    # clear client-side stored device token for this browser
-    components.html("<script>localStorage.removeItem('soda_auth_token');window.location.href=window.location.pathname;</script>", height=0)
+    # clear client-side stored device token for this browser and request server to delete it
+    components.html(
+        """
+        <script>
+        (function(){
+            try{
+                const t = localStorage.getItem('soda_auth_token') || sessionStorage.getItem('soda_auth_token');
+                if(t){
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('clear_token','1');
+                    url.searchParams.set('auth_token', t);
+                    window.location.href = url.toString();
+                }else{
+                    localStorage.removeItem('soda_auth_token');
+                    sessionStorage.removeItem('soda_auth_token');
+                    window.location.href = window.location.pathname;
+                }
+            }catch(e){
+                localStorage.removeItem('soda_auth_token');
+                sessionStorage.removeItem('soda_auth_token');
+                window.location.href = window.location.pathname;
+            }
+        })();
+        </script>
+        """,
+        height=0,
+    )
     st.stop()
 
 # -------------------- ROLE & PAGES --------------------
@@ -488,7 +556,7 @@ elif page == "Flavors":
                     conn.commit()
                     st.success("Flavor added")
                     run_rerun()
-                except sqlite3.IntegrityError:
+                except psycopg2.errors.UniqueViolation:
                     st.error("Flavor already exists")
             else:
                 st.error("Enter flavor name")
