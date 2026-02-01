@@ -351,7 +351,7 @@ def render_login():
 
 
 # -------------------- STARTUP: TOKEN RESTORE / CLEAR FLOW --------------------
-# Allow server to validate an incoming auth token (from URL) and restore session
+# Validate incoming `auth_token` query param and restore session if valid.
 q = st.experimental_get_query_params()
 auth_token = q.get("auth_token", [None])[0]
 auth_attempt = q.get("auth_attempt", [None])[0]
@@ -362,7 +362,6 @@ if clear_token and auth_token:
         delete_device_session(auth_token)
     except Exception:
         pass
-    # clear client-side storage and reload without params
     st.markdown("""<script>
     try{localStorage.removeItem('soda_auth_token'); sessionStorage.removeItem('soda_auth_token');}catch(e){}
     window.location.href = window.location.pathname;
@@ -375,14 +374,12 @@ if auth_token:
         try:
             expires = datetime.fromisoformat(sess["expires_at"]) if isinstance(sess["expires_at"], str) else sess["expires_at"]
             if expires > datetime.utcnow():
-                # load user and restore session
                 c.execute("SELECT id, username, role FROM users WHERE id=%s", (int(sess["user_id"]),))
                 u = c.fetchone()
                 if u:
                     st.session_state.user = {"id": u[0], "username": u[1], "role": u[2]}
                     st.session_state.logged_in = True
                     st.session_state.auth_token = auth_token
-                    # remove query params from URL and rerun to update UI
                     try:
                         st.experimental_set_query_params(**{})
                     except Exception:
@@ -397,7 +394,7 @@ if auth_token:
         except Exception:
             pass
 
-# If no explicit auth attempt, forward stored token from client storage to URL once
+# If not logged in yet, forward client-stored token into URL once so server can validate it
 if not st.session_state.get("logged_in", False) and not auth_token and not auth_attempt and not st.session_state.get("_auth_token_forwarded", False):
     js = """
     <script>
@@ -418,6 +415,7 @@ if not st.session_state.get("logged_in", False) and not auth_token and not auth_
     st.session_state._auth_token_forwarded = True
     st.stop()
 
+
 # If not logged in, show the login/register UI and stop
 if not st.session_state.get("logged_in", False) or not st.session_state.get("user"):
     render_login()
@@ -428,19 +426,16 @@ if not st.session_state.get("logged_in", False) or not st.session_state.get("use
 st.sidebar.title("🥤 Soda Manager")
 st.sidebar.write(f"👤 {st.session_state.user['username']}")
 if st.sidebar.button("Logout"):
-    # remove server-side device session if we have a token
     token = st.session_state.get("auth_token")
     if token:
         try:
             delete_device_session(token)
         except Exception:
             pass
-    # clear server-side session
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
     st.session_state.auth_token = None
-    # clear client storage and reload
     st.markdown("""<script>
     try{localStorage.removeItem('soda_auth_token'); sessionStorage.removeItem('soda_auth_token');}catch(e){}
     window.location.href = window.location.pathname;
