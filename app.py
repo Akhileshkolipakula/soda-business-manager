@@ -382,8 +382,18 @@ if auth_token:
                     st.session_state.user = {"id": u[0], "username": u[1], "role": u[2]}
                     st.session_state.logged_in = True
                     st.session_state.auth_token = auth_token
-                    # remove query params from URL
-                    st.experimental_set_query_params()
+                    # remove query params from URL and rerun to update UI
+                    try:
+                        st.experimental_set_query_params(**{})
+                    except Exception:
+                        pass
+                    try:
+                        run_rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
         except Exception:
             pass
 
