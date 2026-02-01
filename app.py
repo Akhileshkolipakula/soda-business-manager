@@ -262,7 +262,7 @@ def render_login():
                 st.session_state.logged_in = True
                 st.session_state.page = "Dashboard"
                 st.success("Login successful")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Invalid credentials")
 
