@@ -1,7 +1,8 @@
 # app.py
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime, timedelta
+import uuid
 import plotly.express as px
 import os
 import hashlib
@@ -131,10 +132,30 @@ def create_tables():
     );
     """)
 
+    # device_sessions stores per-device auth tokens so users can stay logged in per device
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS device_sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        created_at TEXT,
+        expires_at TEXT
+    );
+    """)
+
     conn.commit()
 
 
 create_tables()
+
+# Clean up expired sessions periodically
+def clear_expired_sessions():
+    try:
+        c.execute("DELETE FROM device_sessions WHERE expires_at <= %s", (datetime.utcnow().isoformat(),))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+clear_expired_sessions()
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Soda Business Manager", layout="wide")
@@ -210,6 +231,28 @@ def verify_user(username, password):
 
     return c.fetchone()
 
+
+# -------------------- DEVICE SESSION HELPERS --------------------
+def create_device_session(token, user_id, expires_at):
+    c.execute("""
+        INSERT INTO device_sessions(token,user_id,created_at,expires_at)
+        VALUES (%s,%s,%s,%s)
+    """, (token, int(user_id), datetime.utcnow().isoformat(), expires_at.isoformat()))
+    conn.commit()
+
+
+def get_device_session(token):
+    c.execute("SELECT token,user_id,created_at,expires_at FROM device_sessions WHERE token=%s", (token,))
+    row = c.fetchone()
+    if not row:
+        return None
+    return {"token": row[0], "user_id": row[1], "created_at": row[2], "expires_at": row[3]}
+
+
+def delete_device_session(token):
+    c.execute("DELETE FROM device_sessions WHERE token=%s", (token,))
+    conn.commit()
+
 # -------------------- AUDIT HELPERS --------------------
 
 def current_user():
@@ -251,34 +294,119 @@ def render_login():
     tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
-        remember = st.checkbox("Remember me on this device", key="login_remember")
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_user")
+            password = st.text_input("Password", type="password", key="login_pass")
+            remember = st.checkbox("Remember me on this device", key="login_remember")
+            submitted = st.form_submit_button("Login")
 
-        if st.button("Login"):
-            user = verify_user(username, password)
-            if user:
-                st.session_state.user = {"id": user[0], "username": username, "role": user[1]}
-                st.session_state.logged_in = True
-                st.session_state.page = "Dashboard"
-                st.success("Login successful")
-                run_rerun()
-            else:
-                st.error("Invalid credentials")
+            if submitted:
+                user = verify_user(username, password)
+                if user:
+                    # create a per-device token and store it server-side
+                    token = uuid.uuid4().hex
+                    if remember:
+                        expires = datetime.utcnow() + timedelta(days=30)
+                    else:
+                        expires = datetime.utcnow() + timedelta(hours=8)
+
+                    create_device_session(token, user[0], expires)
+
+                    # store token on client (localStorage if remember, else sessionStorage)
+                    store_js = (
+                        "<script>"
+                        "try{"
+                        f"{ 'localStorage.setItem(\'soda_auth_token\', \'' + token + '\');' if True else '' }"
+                    )
+                    if remember:
+                        store_js = (
+                            "<script>try{localStorage.setItem('soda_auth_token','" + token + "');}catch(e){}"
+                        )
+                    else:
+                        store_js = (
+                            "<script>try{sessionStorage.setItem('soda_auth_token','" + token + "');}catch(e){}"
+                        )
+
+                    # redirect with auth token so server-side can validate and set session_state
+                    store_js += "window.location.href = window.location.pathname + '?auth_token=" + token + "';</script>"
+                    st.markdown(store_js, unsafe_allow_html=True)
+                    st.session_state.auth_token = token
+                else:
+                    st.error("Invalid credentials")
 
     with tab2:
-        new_user = st.text_input("New Username", key="reg_user")
-        new_pass = st.text_input("New Password", type="password", key="reg_pass")
-        if st.button("Register"):
-            if len(new_pass) < 4:
-                st.error("Password too short")
-            else:
-                ok = create_user(new_user, new_pass)
-                if ok:
-                    st.success("Account created. Login now.")
+        with st.form("register_form"):
+            new_user = st.text_input("New Username", key="reg_user")
+            new_pass = st.text_input("New Password", type="password", key="reg_pass")
+            reg_sub = st.form_submit_button("Register")
+            if reg_sub:
+                if len(new_pass) < 4:
+                    st.error("Password too short")
                 else:
-                    st.error("Username already exists")
+                    ok = create_user(new_user, new_pass)
+                    if ok:
+                        st.success("Account created. Login now.")
+                    else:
+                        st.error("Username already exists")
 
+
+# -------------------- STARTUP: TOKEN RESTORE / CLEAR FLOW --------------------
+# Allow server to validate an incoming auth token (from URL) and restore session
+q = st.experimental_get_query_params()
+auth_token = q.get("auth_token", [None])[0]
+auth_attempt = q.get("auth_attempt", [None])[0]
+clear_token = q.get("clear_token", [None])[0]
+
+if clear_token and auth_token:
+    try:
+        delete_device_session(auth_token)
+    except Exception:
+        pass
+    # clear client-side storage and reload without params
+    st.markdown("""<script>
+    try{localStorage.removeItem('soda_auth_token'); sessionStorage.removeItem('soda_auth_token');}catch(e){}
+    window.location.href = window.location.pathname;
+    </script>""", unsafe_allow_html=True)
+    st.stop()
+
+if auth_token:
+    sess = get_device_session(auth_token)
+    if sess:
+        try:
+            expires = datetime.fromisoformat(sess["expires_at"]) if isinstance(sess["expires_at"], str) else sess["expires_at"]
+            if expires > datetime.utcnow():
+                # load user and restore session
+                c.execute("SELECT id, username, role FROM users WHERE id=%s", (int(sess["user_id"]),))
+                u = c.fetchone()
+                if u:
+                    st.session_state.user = {"id": u[0], "username": u[1], "role": u[2]}
+                    st.session_state.logged_in = True
+                    st.session_state.auth_token = auth_token
+                    # remove query params from URL
+                    st.experimental_set_query_params()
+        except Exception:
+            pass
+
+# If no explicit auth attempt, forward stored token from client storage to URL once
+if not st.session_state.get("logged_in", False) and not auth_token and not auth_attempt and not st.session_state.get("_auth_token_forwarded", False):
+    js = """
+    <script>
+    (function(){
+        try{
+            const token = localStorage.getItem('soda_auth_token') || sessionStorage.getItem('soda_auth_token');
+            if(token){
+                const url = new URL(window.location.href);
+                url.searchParams.set('auth_token', token);
+                url.searchParams.set('auth_attempt', '1');
+                window.location.href = url.toString();
+            }
+        }catch(e){}
+    })();
+    </script>
+    """
+    st.markdown(js, unsafe_allow_html=True)
+    st.session_state._auth_token_forwarded = True
+    st.stop()
 
 # If not logged in, show the login/register UI and stop
 if not st.session_state.get("logged_in", False) or not st.session_state.get("user"):
@@ -290,10 +418,24 @@ if not st.session_state.get("logged_in", False) or not st.session_state.get("use
 st.sidebar.title("🥤 Soda Manager")
 st.sidebar.write(f"👤 {st.session_state.user['username']}")
 if st.sidebar.button("Logout"):
+    # remove server-side device session if we have a token
+    token = st.session_state.get("auth_token")
+    if token:
+        try:
+            delete_device_session(token)
+        except Exception:
+            pass
+    # clear server-side session
     st.session_state.logged_in = False
     st.session_state.user = None
     st.session_state.page = "Login"
-    run_rerun()
+    st.session_state.auth_token = None
+    # clear client storage and reload
+    st.markdown("""<script>
+    try{localStorage.removeItem('soda_auth_token'); sessionStorage.removeItem('soda_auth_token');}catch(e){}
+    window.location.href = window.location.pathname;
+    </script>""", unsafe_allow_html=True)
+    st.stop()
 
 # -------------------- ROLE & PAGES --------------------
 role = st.session_state.user.get("role", "staff")
