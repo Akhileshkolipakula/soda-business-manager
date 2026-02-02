@@ -28,13 +28,17 @@ DB_PORT = os.getenv("DB_PORT")
 
 @st.cache_resource
 def get_conn():
-    return psycopg2.connect(
+    conn = psycopg2.connect(
         host=DB_HOST,
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASS,
         port=DB_PORT
     )
+    # Ensure DDL statements don't leave the connection in an aborted
+    # transaction state; enable autocommit for schema/DDL operations.
+    conn.autocommit = True
+    return conn
 
 conn = get_conn()
 c = conn.cursor()
