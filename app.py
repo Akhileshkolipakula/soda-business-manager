@@ -65,7 +65,8 @@ def create_tables():
         created_by TEXT,
         created_at TEXT,
         updated_by TEXT,
-        updated_at TEXT
+        updated_at TEXT,
+        is_active BOOLEAN DEFAULT TRUE
     );
     """)
 
@@ -163,6 +164,7 @@ def get_products():
         SELECT p.id, p.flavor_id, p.cost_price, p.selling_price, p.stock, f.flavor_name, p.created_by, p.created_at, p.updated_by, p.updated_at
         FROM products p
         LEFT JOIN flavors f ON p.flavor_id = f.id
+        WHERE p.is_active=TRUE
         ORDER BY f.flavor_name, p.id
     """, conn)
     if "flavor_name" in df.columns:
@@ -472,7 +474,8 @@ elif page == "Products":
             if col5.button("✏️ Edit", key=f"edit_prod_{row['id']}"):
                 st.session_state.edit_product_id = int(row["id"])
             if col6.button("🗑", key=f"del_prod_{row['id']}"):
-                c.execute("DELETE FROM products WHERE id=%s", (int(row["id"]),))
+                c.execute("UPDATE products SET is_active=FALSE, updated_by=%s, updated_at=%s WHERE id=%s",
+                (current_user(), date.today().isoformat(), int(row["id"])))
                 conn.commit()
                 st.success("Product deleted")
                 run_rerun()
